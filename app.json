@@ -1,0 +1,27 @@
+{
+  "expo": {
+    "name": "SmartStudy",
+    "slug": "smart-study-app",
+    "version": "1.0.0",
+    "icon": "./assets/logo_scaled.jpeg",
+    "scheme": "smartstudy",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "web": {
+      "bundler": "metro"
+    },
+    "android": {
+      "package": "com.anonymous.smartstudyquizgenerator",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/logo_scaled.jpeg",
+        "backgroundColor": "#FFFFFF"
+      },
+      "splash": {
+        "image": "./assets/logo_scaled.jpeg",
+        "resizeMode": "contain",
+        "backgroundColor": "#FFFFFF"
+      }
+    }
+  }
+}
