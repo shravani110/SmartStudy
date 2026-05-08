@@ -1,6 +1,7 @@
-import React, { useMemo, useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   ActivityIndicator,
+  Alert,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -8,48 +9,85 @@ import {
   Text,
   TextInput,
   View,
+  ScrollView,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { GoogleSignin } from "@react-native-google-signin/google-signin";
 
 import { getColors } from "../constants/theme";
 import { useAuth } from "../context/AuthContext";
 import { useTheme } from "../context/ThemeContext";
 
+// Web Client ID from google-services.json
+const WEB_CLIENT_ID = "385864340445-hvmsu5fno111jl9ahp6ea1lubhvhc4sp.apps.googleusercontent.com";
+
 export default function LoginScreen() {
   const { isDarkMode } = useTheme();
   const colors = getColors(isDarkMode);
-  const { requestOtp, verifyOtp, pendingVerification } = useAuth();
+  const { signInWithEmail, signUpWithEmail, signInWithGoogle } = useAuth();
 
+  const [isLogin, setIsLogin] = useState(true);
   const [name, setName] = useState("");
-  const [phone, setPhone] = useState("");
-  const [otp, setOtp] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const phoneDigits = phone.replace(/\D/g, '');
-  const canRequestOtp = useMemo(() => name.trim().length >= 2 && phoneDigits.length === 10, [name, phoneDigits]);
-  const canVerifyOtp = useMemo(() => otp.trim().length === 6, [otp]);
-
-  async function onRequestOtp() {
+  async function handleEmailAuth() {
     setIsSubmitting(true);
     setError("");
     try {
-      await requestOtp({ name, phone });
-      setOtp("");
+      if (isLogin) {
+        await signInWithEmail({ email, password });
+      } else {
+        if (!name.trim()) {
+          throw new Error("Please enter your name");
+        }
+        await signUpWithEmail({ name: name.trim(), email, password });
+      }
     } catch (err) {
-      setError(err.message || "Unable to send OTP.");
+      setError(err.message || "Authentication failed");
     } finally {
       setIsSubmitting(false);
     }
   }
 
-  async function onVerifyOtp() {
+  useEffect(() => {
+    // Configure Google Sign-In
+    GoogleSignin.configure({
+      webClientId: WEB_CLIENT_ID,
+      offlineAccess: true,
+    });
+  }, []);
+
+  async function handleGoogleSignIn() {
     setIsSubmitting(true);
     setError("");
     try {
-      await verifyOtp(otp);
+      await GoogleSignin.hasPlayServices({ showPlayServicesUpdateDialog: true });
+      const userInfo = await GoogleSignin.signIn();
+      
+      // Get tokens
+      const tokens = await GoogleSignin.getTokens();
+      
+      // Call the auth context with Google user data
+      await signInWithGoogle({
+        email: userInfo.data?.user.email,
+        name: userInfo.data?.user.name,
+        photo: userInfo.data?.user.photo,
+        idToken: tokens.idToken,
+      });
     } catch (err) {
-      setError(err.message || "OTP verification failed.");
+      console.error("Google Sign-In Error:", err);
+      if (err.code === "SIGN_IN_CANCELLED") {
+        // User cancelled - no error needed
+      } else if (err.code === "IN_PROGRESS") {
+        setError("Sign in is already in progress");
+      } else if (err.code === "PLAY_SERVICES_NOT_AVAILABLE") {
+        setError("Google Play Services not available");
+      } else {
+        setError(err.message || "Google sign-in failed");
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -57,104 +95,106 @@ export default function LoginScreen() {
 
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
-      <KeyboardAvoidingView behavior={Platform.select({ ios: "padding", android: undefined })} style={styles.keyboardWrap}>
-        <View style={[styles.card, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-          <Text style={[styles.title, { color: colors.text }]}>Welcome to Smart Study</Text>
-          <Text style={[styles.subtitle, { color: colors.textSoft }]}>Login with your phone number and OTP.</Text>
+      <KeyboardAvoidingView
+        behavior={Platform.select({ ios: "padding", android: undefined })}
+        style={styles.keyboardWrap}
+      >
+        <ScrollView contentContainerStyle={styles.scrollContent}>
+          <View style={[styles.card, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+            <Text style={[styles.title, { color: colors.text }]}>Welcome to Smart Study</Text>
+            <Text style={[styles.subtitle, { color: colors.textSoft }]}>
+              {isLogin ? "Sign in to continue" : "Create an account to get started"}
+            </Text>
 
-          <Text style={[styles.label, { color: colors.text }]}>Name</Text>
-          <TextInput
-            value={name}
-            onChangeText={setName}
-            placeholder="Enter your full name"
-            placeholderTextColor={colors.muted}
-            style={[
-              styles.input,
-              {
-                color: colors.text,
-                borderColor: colors.border,
-                backgroundColor: colors.surface,
-              },
-            ]}
-          />
-
-          <Text style={[styles.label, { color: colors.text }]}>Phone Number</Text>
-          <TextInput
-            value={phone}
-            onChangeText={(text) => {
-              const digits = text.replace(/\D/g, '').slice(0, 10);
-              setPhone(digits);
-            }}
-            keyboardType="number-pad"
-            placeholder="10-digit phone number"
-            placeholderTextColor={colors.muted}
-            maxLength={10}
-            style={[
-              styles.input,
-              {
-                color: colors.text,
-                borderColor: colors.border,
-                backgroundColor: colors.surface,
-              },
-            ]}
-          />
-
-          <Pressable
-            disabled={!canRequestOtp || isSubmitting}
-            onPress={onRequestOtp}
-            style={({ pressed }) => [
-              styles.button,
-              {
-                backgroundColor: canRequestOtp ? colors.primary : colors.border,
-                opacity: pressed ? 0.9 : 1,
-              },
-            ]}
-          >
-            {isSubmitting ? (
-              <ActivityIndicator color="#FFFFFF" />
-            ) : (
-              <Text style={styles.buttonText}>{pendingVerification ? "Resend OTP" : "Send OTP"}</Text>
+            {!isLogin && (
+              <>
+                <Text style={[styles.label, { color: colors.text }]}>Name</Text>
+                <TextInput
+                  style={[styles.input, { borderColor: colors.border, color: colors.text }]}
+                  placeholder="Enter your name"
+                  placeholderTextColor={colors.textSoft}
+                  value={name}
+                  onChangeText={setName}
+                  autoCapitalize="words"
+                />
+              </>
             )}
-          </Pressable>
 
-          {pendingVerification ? (
-            <>
-              <Text style={[styles.label, { color: colors.text, marginTop: 14 }]}>Enter OTP</Text>
-              <TextInput
-                value={otp}
-                onChangeText={setOtp}
-                keyboardType="number-pad"
-                placeholder="6-digit OTP"
-                placeholderTextColor={colors.muted}
-                maxLength={6}
-                style={[
-                  styles.input,
-                  {
-                    color: colors.text,
-                    borderColor: colors.border,
-                    backgroundColor: colors.surface,
-                  },
-                ]}
-              />
+            <Text style={[styles.label, { color: colors.text }]}>Email</Text>
+            <TextInput
+              style={[styles.input, { borderColor: colors.border, color: colors.text }]}
+              placeholder="Enter your email"
+              placeholderTextColor={colors.textSoft}
+              value={email}
+              onChangeText={setEmail}
+              keyboardType="email-address"
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
 
-              <Pressable
-                disabled={!canVerifyOtp || isSubmitting}
-                onPress={onVerifyOtp}
-                style={({ pressed }) => [
-                  styles.button,
-                  {
-                    backgroundColor: canVerifyOtp ? colors.success : colors.border,
-                    opacity: pressed ? 0.9 : 1,
-                  },
-                ]}
-              >
-                {isSubmitting ? <ActivityIndicator color="#FFFFFF" /> : <Text style={styles.buttonText}>Verify OTP</Text>}
-              </Pressable>
-            </>
-          ) : null}
+            <Text style={[styles.label, { color: colors.text }]}>Password</Text>
+            <TextInput
+              style={[styles.input, { borderColor: colors.border, color: colors.text }]}
+              placeholder="Enter your password"
+              placeholderTextColor={colors.textSoft}
+              value={password}
+              onChangeText={setPassword}
+              secureTextEntry
+            />
 
-          {error ? <Text style={[styles.errorText, { color: colors.danger }]}>{error}</Text> : null}
-        </View>
+            <Pressable
+              onPress={handleEmailAuth}
+              disabled={isSubmitting || !email.trim() || !password.trim()}
+              style={({ pressed }) => [
+                styles.button,
+                {
+                  backgroundColor: colors.primary,
+                  opacity: pressed || isSubmitting || !email.trim() || !password.trim() ? 0.7 : 1,
+                },
+              ]}
+            >
+              {isSubmitting ? (
+                <ActivityIndicator color="#FFFFFF" />
+              ) : (
+                <Text style={styles.buttonText}>
+                  {isLogin ? "Sign In" : "Sign Up"}
+                </Text>
+              )}
+            </Pressable>
+
+            <Pressable onPress={() => { setIsLogin(!isLogin); setError(""); }} style={styles.toggleBtn}>
+              <Text style={[styles.toggleText, { color: colors.primary }]}>
+                {isLogin ? "Don't have an account? Sign Up" : "Already have an account? Sign In"}
+              </Text>
+            </Pressable>
+
+            <View style={styles.divider}>
+              <View style={[styles.dividerLine, { backgroundColor: colors.border }]} />
+              <Text style={[styles.dividerText, { color: colors.textSoft }]}>OR</Text>
+              <View style={[styles.dividerLine, { backgroundColor: colors.border }]} />
+            </View>
+
+            <Pressable
+              onPress={handleGoogleSignIn}
+              disabled={isSubmitting}
+              style={({ pressed }) => [
+                styles.button,
+                styles.googleButton,
+                {
+                  backgroundColor: colors.surface,
+                  borderColor: colors.border,
+                  opacity: pressed || isSubmitting ? 0.7 : 1,
+                },
+              ]}
+            >
+              <Text style={[styles.buttonText, { color: colors.text }]}>
+                Continue with Google
+              </Text>
+            </Pressable>
+
+            {error ? <Text style={[styles.errorText, { color: colors.danger }]}>{error}</Text> : null}
+          </View>
+        </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -166,6 +206,9 @@ const styles = StyleSheet.create({
   },
   keyboardWrap: {
     flex: 1,
+  },
+  scrollContent: {
+    flexGrow: 1,
     justifyContent: "center",
     padding: 20,
   },
@@ -178,15 +221,18 @@ const styles = StyleSheet.create({
   title: {
     fontSize: 24,
     fontWeight: "800",
+    textAlign: "center",
   },
   subtitle: {
     fontSize: 14,
-    marginBottom: 8,
+    marginBottom: 16,
+    textAlign: "center",
   },
   label: {
     fontSize: 13,
     fontWeight: "700",
-    marginTop: 4,
+    marginTop: 12,
+    marginBottom: 4,
   },
   input: {
     borderWidth: 1,
@@ -196,7 +242,7 @@ const styles = StyleSheet.create({
     fontSize: 15,
   },
   button: {
-    marginTop: 10,
+    marginTop: 20,
     borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
@@ -208,9 +254,36 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: "800",
   },
-  errorText: {
+  googleButton: {
+    borderWidth: 1,
     marginTop: 10,
+  },
+  toggleBtn: {
+    marginTop: 16,
+    alignItems: "center",
+  },
+  toggleText: {
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  divider: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginVertical: 20,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+  },
+  dividerText: {
+    marginHorizontal: 10,
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  errorText: {
+    marginTop: 16,
     fontSize: 13,
     fontWeight: "600",
+    textAlign: "center",
   },
 });

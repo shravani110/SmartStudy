@@ -1,23 +1,17 @@
 import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
-import { Alert } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 const AuthContext = createContext();
 
 const AUTH_USER_KEY = "authUser";
 
-function normalizePhone(phone) {
-  return phone.replace(/[^0-9+]/g, "").trim();
-}
-
-function generateOtp() {
-  return String(Math.floor(100000 + Math.random() * 900000));
-}
+// Backend API URL - uses local network IP for mobile testing
+// Change this to your actual backend URL when deployed
+const API_URL = process.env.EXPO_PUBLIC_API_URL || "http://192.168.1.36:5000/api";
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
-  const [pendingVerification, setPendingVerification] = useState(null);
 
   useEffect(() => {
     loadSavedUser();
@@ -36,62 +30,111 @@ export function AuthProvider({ children }) {
     }
   }
 
-  async function requestOtp({ name, phone }) {
-    const normalizedPhone = normalizePhone(phone);
-    const trimmedName = name.trim();
+  // Email/Password Sign Up
+  async function signUpWithEmail({ name, email, password }) {
+    try {
+      const response = await fetch(`${API_URL}/auth/signup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, email, password }),
+      });
 
-    if (!trimmedName || trimmedName.length < 2) {
-      throw new Error("Please enter a valid name.");
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.message || "Sign up failed");
+      }
+
+      const signedInUser = {
+        id: data.user.id,
+        name: data.user.name,
+        email: data.user.email,
+        token: data.token,
+        provider: "email",
+        signedInAt: Date.now(),
+      };
+
+      setUser(signedInUser);
+      await AsyncStorage.setItem(AUTH_USER_KEY, JSON.stringify(signedInUser));
+      return signedInUser;
+    } catch (error) {
+      throw new Error(error.message || "Sign up failed. Please try again.");
     }
-
-    if (!normalizedPhone || normalizedPhone.length < 10) {
-      throw new Error("Please enter a valid phone number.");
-    }
-
-    const code = generateOtp();
-    const expiresAt = Date.now() + 5 * 60 * 1000;
-
-    setPendingVerification({
-      name: trimmedName,
-      phone: normalizedPhone,
-      code,
-      expiresAt,
-    });
-
-    // Demo OTP for local/dev use. Replace with real SMS provider in production.
-    Alert.alert("OTP sent", `Your verification code is ${code}`);
   }
 
-  async function verifyOtp(inputOtp) {
-    const normalizedOtp = String(inputOtp).trim();
+  // Email/Password Sign In
+  async function signInWithEmail({ email, password }) {
+    try {
+      const response = await fetch(`${API_URL}/auth/signin`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
 
-    if (!pendingVerification) {
-      throw new Error("Please request an OTP first.");
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.message || "Invalid email or password");
+      }
+
+      const signedInUser = {
+        id: data.user.id,
+        name: data.user.name,
+        email: data.user.email,
+        token: data.token,
+        provider: "email",
+        signedInAt: Date.now(),
+      };
+
+      setUser(signedInUser);
+      await AsyncStorage.setItem(AUTH_USER_KEY, JSON.stringify(signedInUser));
+      return signedInUser;
+    } catch (error) {
+      throw new Error(error.message || "Sign in failed. Please try again.");
     }
+  }
 
-    if (Date.now() > pendingVerification.expiresAt) {
-      setPendingVerification(null);
-      throw new Error("OTP expired. Please request a new code.");
+  // Google Sign In - uses backend to verify Google token
+  async function signInWithGoogle(googleUserData) {
+    try {
+      // Send Google user data to backend for verification/storage
+      const response = await fetch(`${API_URL}/auth/google`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: googleUserData.email,
+          name: googleUserData.name || googleUserData.displayName,
+          photo: googleUserData.photo || googleUserData.photoURL,
+          idToken: googleUserData.idToken,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.message || "Google sign in failed");
+      }
+
+      const signedInUser = {
+        id: data.user.id,
+        name: data.user.name,
+        email: data.user.email,
+        avatar: data.user.photo || googleUserData.photo,
+        token: data.token,
+        provider: "google",
+        signedInAt: Date.now(),
+      };
+
+      setUser(signedInUser);
+      await AsyncStorage.setItem(AUTH_USER_KEY, JSON.stringify(signedInUser));
+      return signedInUser;
+    } catch (error) {
+      throw new Error(error.message || "Google sign in failed. Please try again.");
     }
-
-    if (normalizedOtp !== pendingVerification.code) {
-      throw new Error("Invalid OTP. Please try again.");
-    }
-
-    const signedInUser = {
-      name: pendingVerification.name,
-      phone: pendingVerification.phone,
-      verifiedAt: Date.now(),
-    };
-
-    setUser(signedInUser);
-    setPendingVerification(null);
-    await AsyncStorage.setItem(AUTH_USER_KEY, JSON.stringify(signedInUser));
   }
 
   async function signOut() {
     setUser(null);
-    setPendingVerification(null);
     await AsyncStorage.removeItem(AUTH_USER_KEY);
   }
 
@@ -99,12 +142,12 @@ export function AuthProvider({ children }) {
     () => ({
       user,
       isAuthLoading,
-      pendingVerification,
-      requestOtp,
-      verifyOtp,
+      signUpWithEmail,
+      signInWithEmail,
+      signInWithGoogle,
       signOut,
     }),
-    [user, isAuthLoading, pendingVerification]
+    [user, isAuthLoading]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

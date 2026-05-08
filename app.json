@@ -22,6 +22,14 @@
         "resizeMode": "contain",
         "backgroundColor": "#FFFFFF"
       }
-    }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "3b86b84a-9a40-4a7a-bb00-dc5065a6d816"
+      }
+    },
+    "plugins": [
+      "@react-native-google-signin/google-signin"
+    ]
   }
 }

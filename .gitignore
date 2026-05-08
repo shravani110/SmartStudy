@@ -9,6 +9,7 @@ android/build/
 android/app/build/
 android/app/.cxx/
 android/.kotlin/
+android/app/debug.keystore
 
 dist/
 dist-*/
