@@ -2,6 +2,11 @@ const AI_API_URL = process.env.EXPO_PUBLIC_AI_API_URL?.trim();
 const AI_API_KEY = process.env.EXPO_PUBLIC_AI_API_KEY?.trim();
 const REQUIRED_KEYS = ["simplified_notes", "key_takeaways", "flashcards"];
 const IS_GEMINI_API = AI_API_URL?.includes("generativelanguage.googleapis.com");
+const MIN_FLASHCARDS = 6;
+const MAX_FLASHCARDS = 12;
+const MIN_QUIZ_QUESTIONS = 10;
+const MAX_QUIZ_QUESTIONS = 20;
+const MAX_TAKEAWAYS = 10;
 
 const STOPWORDS = new Set([
   "the",
@@ -46,7 +51,46 @@ const STOPWORDS = new Set([
 ]);
 
 function buildPrompt(userInput) {
-  return `Analyze the following text. Return ONLY a valid JSON object with three keys: 'simplified_notes' (a 2-paragraph summary in simple language), 'key_takeaways' (an array of 5 bullet points), and 'flashcards' (an array of objects, each with a 'question' and 'answer'). Every flashcard question must be a real study question about the topic, not a label like "Key point 1" or "Step 2". The text is: ${userInput}`;
+  const wordCount = userInput.split(/\s+/).length;
+  const estimatedFlashcards = getTargetFlashcardCountFromWords(wordCount);
+  const estimatedQuizQuestions = getTargetQuizCountFromWords(wordCount);
+  const estimatedTakeaways = getTargetTakeawayCountFromWords(wordCount);
+  
+  return `Analyze the following text comprehensively. Return ONLY a valid JSON object with these keys:
+- 'simplified_notes': A complete summary that covers the material from start to end. Do not skip sections.
+- 'key_takeaways': An array of ${estimatedTakeaways} concise points that together cover the whole topic.
+- 'flashcards': An array of ${estimatedFlashcards} flashcards (objects with 'question' and 'answer'). Questions must be based on the main topic and cover different parts of the material.
+- 'quiz': An array of ${estimatedQuizQuestions} multiple choice questions (objects with 'question', 'options' array of 4 choices, 'correctAnswer' index 0-3, and 'explanation'). Questions must cover the full topic.
+
+Content: ${userInput}`;
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function getTargetTakeawayCountFromWords(wordCount) {
+  return clamp(Math.ceil(wordCount / 100), 5, MAX_TAKEAWAYS);
+}
+
+function getTargetFlashcardCountFromWords(wordCount) {
+  return clamp(Math.ceil(wordCount / 90), MIN_FLASHCARDS, MAX_FLASHCARDS);
+}
+
+function getTargetQuizCountFromWords(wordCount) {
+  return clamp(Math.ceil(wordCount / 55), MIN_QUIZ_QUESTIONS, MAX_QUIZ_QUESTIONS);
+}
+
+function getTargetTakeawayCount(totalSentences) {
+  return clamp(Math.ceil(totalSentences / 2), 5, MAX_TAKEAWAYS);
+}
+
+function getTargetFlashcardCount(totalSentences) {
+  return clamp(Math.ceil(totalSentences / 2), MIN_FLASHCARDS, MAX_FLASHCARDS);
+}
+
+function getTargetQuizCount(totalSentences) {
+  return clamp(Math.ceil(totalSentences * 0.75), MIN_QUIZ_QUESTIONS, MAX_QUIZ_QUESTIONS);
 }
 
 function hasStudyGuideShape(value) {
@@ -55,6 +99,63 @@ function hasStudyGuideShape(value) {
     typeof value === "object" &&
     REQUIRED_KEYS.every((key) => Object.prototype.hasOwnProperty.call(value, key))
   );
+}
+
+// Build quiz questions from content with topic-wide coverage
+function buildQuizFromGroupedContent(groupedContent, topicName, targetQuestions = MAX_QUIZ_QUESTIONS) {
+  const quiz = [];
+  const usedQuestions = new Set();
+  const coverageItems = getCoverageItems(groupedContent);
+  const desiredCount = clamp(targetQuestions, MIN_QUIZ_QUESTIONS, MAX_QUIZ_QUESTIONS);
+
+  for (let i = 0; i < desiredCount && i < coverageItems.length; i += 1) {
+    const currentItem = coverageItems[i];
+    const question = dedupeQuestion(
+      makeQuestionFromSentence(currentItem.sentence, topicName, currentItem.category, currentItem.index),
+      topicName,
+      usedQuestions
+    );
+
+    const correctAnswer = trimAnswer(currentItem.sentence);
+    const distractors = coverageItems
+      .filter((_, idx) => idx !== i)
+      .map((item) => trimAnswer(item.sentence))
+      .filter((answer) => answer && answer !== correctAnswer);
+    const uniqueDistractors = Array.from(new Set(distractors)).slice(0, 3);
+
+    while (uniqueDistractors.length < 3) {
+      uniqueDistractors.push(`A different detail about ${topicName}.`);
+    }
+
+    const options = [correctAnswer, ...uniqueDistractors];
+    const shuffledIndices = [0, 1, 2, 3].sort(() => Math.random() - 0.5);
+    const shuffledOptions = shuffledIndices.map((idx) => options[idx]);
+    const correctIndex = shuffledIndices.indexOf(0);
+
+    quiz.push({
+      question,
+      options: shuffledOptions,
+      correctAnswer: correctIndex,
+      explanation: `This is supported by the study material: ${correctAnswer}`,
+    });
+  }
+
+  while (quiz.length < desiredCount) {
+    const genericQ = `Question ${quiz.length + 1}: What is an important idea about ${topicName}?`;
+    quiz.push({
+      question: genericQ,
+      options: [
+        "Its main definition",
+        "How it works",
+        "Its applications and key points",
+        "All of the above",
+      ],
+      correctAnswer: 3,
+      explanation: `The topic should be understood through definition, process, and application.`,
+    });
+  }
+
+  return quiz;
 }
 
 function stripCodeFences(value) {
@@ -139,6 +240,113 @@ function findStudyGuidePayload(value) {
   }
 
   return null;
+}
+
+function buildGroupedContent(sourceText) {
+  const sentences = splitIntoSentences(sourceText);
+  const fallbackSentences = sentences.length > 0 ? sentences : [cleanSentence(sourceText)];
+  const groupedContent = {
+    definitions: [],
+    processes: [],
+    examples: [],
+    benefits: [],
+    details: [],
+  };
+
+  fallbackSentences.forEach((sentence) => {
+    const lower = sentence.toLowerCase();
+    if (
+      lower.includes("is a") ||
+      lower.includes("refers to") ||
+      lower.includes("means") ||
+      lower.includes("defined as")
+    ) {
+      groupedContent.definitions.push(cleanSentence(sentence));
+    } else if (
+      lower.includes("step") ||
+      lower.includes("process") ||
+      lower.includes("how") ||
+      lower.includes("works by") ||
+      lower.includes("first") ||
+      lower.includes("then") ||
+      lower.includes("finally")
+    ) {
+      groupedContent.processes.push(cleanSentence(sentence));
+    } else if (
+      lower.includes("example") ||
+      lower.includes("such as") ||
+      lower.includes("like") ||
+      lower.includes("for instance")
+    ) {
+      groupedContent.examples.push(cleanSentence(sentence));
+    } else if (
+      lower.includes("benefit") ||
+      lower.includes("advantage") ||
+      lower.includes("important") ||
+      lower.includes("helps") ||
+      lower.includes("allows")
+    ) {
+      groupedContent.benefits.push(cleanSentence(sentence));
+    } else {
+      groupedContent.details.push(cleanSentence(sentence));
+    }
+  });
+
+  return {
+    groupedContent,
+    fallbackSentences,
+  };
+}
+
+function collectAllContent(groupedContent) {
+  return [
+    ...groupedContent.definitions,
+    ...groupedContent.processes,
+    ...groupedContent.examples,
+    ...groupedContent.benefits,
+    ...groupedContent.details,
+  ].filter(Boolean);
+}
+
+function getCoverageItems(groupedContent) {
+  const groups = [
+    ["definitions", groupedContent.definitions],
+    ["processes", groupedContent.processes],
+    ["examples", groupedContent.examples],
+    ["benefits", groupedContent.benefits],
+    ["details", groupedContent.details],
+  ];
+  const maxLength = Math.max(0, ...groups.map(([, sentences]) => sentences.length));
+  const items = [];
+
+  for (let index = 0; index < maxLength; index += 1) {
+    groups.forEach(([category, sentences]) => {
+      if (sentences[index]) {
+        items.push({
+          category,
+          sentence: sentences[index],
+          index,
+        });
+      }
+    });
+  }
+
+  return items;
+}
+
+function pickDistributedItems(items, count) {
+  if (items.length <= count) {
+    return items;
+  }
+
+  const picked = [];
+  const step = (items.length - 1) / Math.max(1, count - 1);
+
+  for (let index = 0; index < count; index += 1) {
+    picked.push(items[Math.round(index * step)]);
+  }
+
+  return Array.from(new Set(picked));
 }
 
 function splitIntoSentences(text) {
@@ -275,37 +483,58 @@ function dedupeQuestion(question, topicName, usedQuestions) {
   return numberedQuestion;
 }
 
-function buildFlashcardsFromGroupedContent(groupedContent, topicName) {
+function buildFlashcardsFromGroupedContent(groupedContent, topicName, targetFlashcards = MAX_FLASHCARDS) {
   const flashcards = [];
   const usedQuestions = new Set();
-  const groupsInOrder = [
-    ["definitions", groupedContent.definitions],
-    ["processes", groupedContent.processes],
-    ["examples", groupedContent.examples],
-    ["benefits", groupedContent.benefits],
-    ["details", groupedContent.details],
-  ];
+  const coverageItems = getCoverageItems(groupedContent);
+  const desiredCount = clamp(targetFlashcards, MIN_FLASHCARDS, MAX_FLASHCARDS);
 
-  groupsInOrder.forEach(([category, sentences]) => {
-    sentences.forEach((sentence, index) => {
-      if (flashcards.length >= 6) {
-        return;
-      }
+  coverageItems.forEach((item) => {
+    if (flashcards.length >= desiredCount) {
+      return;
+    }
 
-      const question = dedupeQuestion(
-        makeQuestionFromSentence(sentence, topicName, category, index),
-        topicName,
-        usedQuestions
-      );
+    const question = dedupeQuestion(
+      makeQuestionFromSentence(item.sentence, topicName, item.category, item.index),
+      topicName,
+      usedQuestions
+    );
 
-      flashcards.push({
-        question,
-        answer: trimAnswer(sentence),
-      });
+    flashcards.push({
+      question,
+      answer: trimAnswer(item.sentence),
     });
   });
 
+  while (flashcards.length < desiredCount) {
+    const genericQuestions = [
+      `What is the main definition of ${topicName}?`,
+      `How does ${topicName} work?`,
+      `What are the key benefits of ${topicName}?`,
+      `What is an example of ${topicName} in practice?`,
+      `Why is ${topicName} important to understand?`,
+      `What are the main components of ${topicName}?`,
+    ];
+    
+    const genericQ = genericQuestions[flashcards.length % genericQuestions.length];
+    if (!usedQuestions.has(genericQ)) {
+      usedQuestions.add(genericQ);
+      flashcards.push({
+        question: genericQ,
+        answer: `Review the study material for the main point about ${topicName}.`,
+      });
+    }
+  }
+
   return flashcards;
+}
+
+// Public export for building quiz from text
+export function buildQuizFromText(sourceText, targetQuestions = null) {
+  const { groupedContent, fallbackSentences } = buildGroupedContent(sourceText);
+  const topicName = makeTopicName(sourceText);
+  const desiredCount = targetQuestions ?? getTargetQuizCount(fallbackSentences.length);
+  return buildQuizFromGroupedContent(groupedContent, topicName, desiredCount);
 }
 
 export function hasLegacyFlashcards(flashcards) {
@@ -320,58 +549,11 @@ export function hasLegacyFlashcards(flashcards) {
   );
 }
 
-export function buildFlashcardsFromText(sourceText) {
-  const sentences = splitIntoSentences(sourceText);
-  const fallbackSentences = sentences.length > 0 ? sentences : [cleanSentence(sourceText)];
-  const groupedContent = {
-    definitions: [],
-    processes: [],
-    examples: [],
-    benefits: [],
-    details: [],
-  };
-
-  fallbackSentences.forEach((sentence) => {
-    const lower = sentence.toLowerCase();
-    if (
-      lower.includes("is a") ||
-      lower.includes("refers to") ||
-      lower.includes("means") ||
-      lower.includes("defined as")
-    ) {
-      groupedContent.definitions.push(cleanSentence(sentence));
-    } else if (
-      lower.includes("step") ||
-      lower.includes("process") ||
-      lower.includes("how") ||
-      lower.includes("works by") ||
-      lower.includes("first") ||
-      lower.includes("then") ||
-      lower.includes("finally")
-    ) {
-      groupedContent.processes.push(cleanSentence(sentence));
-    } else if (
-      lower.includes("example") ||
-      lower.includes("such as") ||
-      lower.includes("like") ||
-      lower.includes("for instance")
-    ) {
-      groupedContent.examples.push(cleanSentence(sentence));
-    } else if (
-      lower.includes("benefit") ||
-      lower.includes("advantage") ||
-      lower.includes("important") ||
-      lower.includes("helps") ||
-      lower.includes("allows")
-    ) {
-      groupedContent.benefits.push(cleanSentence(sentence));
-    } else {
-      groupedContent.details.push(cleanSentence(sentence));
-    }
-  });
-
+export function buildFlashcardsFromText(sourceText, targetFlashcards = null) {
+  const { groupedContent, fallbackSentences } = buildGroupedContent(sourceText);
   const topicName = makeTopicName(sourceText);
-  const flashcards = buildFlashcardsFromGroupedContent(groupedContent, topicName);
+  const desiredCount = targetFlashcards ?? getTargetFlashcardCount(fallbackSentences.length);
+  const flashcards = buildFlashcardsFromGroupedContent(groupedContent, topicName, desiredCount);
 
   return flashcards.length > 0
     ? flashcards
@@ -384,83 +566,43 @@ export function buildFlashcardsFromText(sourceText) {
 }
 
 function buildLocalStudyGuide(sourceText) {
-  const sentences = splitIntoSentences(sourceText);
-  const fallbackSentences = sentences.length > 0 ? sentences : [cleanSentence(sourceText)];
+  const { groupedContent, fallbackSentences } = buildGroupedContent(sourceText);
+  const topicName = makeTopicName(sourceText);
+  const allContent = collectAllContent(groupedContent);
+  const targetTakeaways = getTargetTakeawayCount(fallbackSentences.length);
+  const targetFlashcards = getTargetFlashcardCount(fallbackSentences.length);
+  const targetQuizQuestions = getTargetQuizCount(fallbackSentences.length);
 
-  // Group sentences by theme/pattern to understand the content structure
-  const groupedContent = {
-    definitions: [],
-    processes: [],
-    examples: [],
-    benefits: [],
-    details: []
-  };
-
-  fallbackSentences.forEach(sentence => {
-    const lower = sentence.toLowerCase();
-    if (lower.includes("is a") || lower.includes("refers to") || lower.includes("means") || lower.includes("defined as")) {
-      groupedContent.definitions.push(cleanSentence(sentence));
-    } else if (lower.includes("step") || lower.includes("process") || lower.includes("how") || lower.includes("works by") || lower.includes("first") || lower.includes("then") || lower.includes("finally")) {
-      groupedContent.processes.push(cleanSentence(sentence));
-    } else if (lower.includes("example") || lower.includes("such as") || lower.includes("like") || lower.includes("for instance")) {
-      groupedContent.examples.push(cleanSentence(sentence));
-    } else if (lower.includes("benefit") || lower.includes("advantage") || lower.includes("important") || lower.includes("helps") || lower.includes("allows")) {
-      groupedContent.benefits.push(cleanSentence(sentence));
-    } else {
-      groupedContent.details.push(cleanSentence(sentence));
-    }
-  });
-
-  // Build simplified notes - plain paragraphs without section headers
+  // Build comprehensive simplified notes - include ALL content without truncation
   let simplifiedNotes = "";
 
-  // Collect all content into simplified paragraphs
-  const allSentences = [];
-
-  // Add definitions (simplified)
-  if (groupedContent.definitions.length > 0) {
-    const def = groupedContent.definitions[0];
-    allSentences.push(def.length > 150 ? def.substring(0, 150) + "..." : def);
+  // Create comprehensive summary organized by topic flow
+  if (allContent.length > 0) {
+    // Organize into logical paragraphs based on content length
+    const sentencesPerParagraph = Math.max(3, Math.ceil(allContent.length / 4));
+    const paragraphs = [];
+    
+    for (let i = 0; i < allContent.length; i += sentencesPerParagraph) {
+      const paragraphSentences = allContent.slice(i, i + sentencesPerParagraph);
+      paragraphs.push(paragraphSentences.join(" "));
+    }
+    
+    simplifiedNotes = paragraphs.join("\n\n");
   }
 
-  // Add process steps as sentences
-  groupedContent.processes.slice(0, 3).forEach((step) => {
-    allSentences.push(step.length > 150 ? step.substring(0, 150) + "..." : step);
+  const keyTakeaways = pickDistributedItems(allContent, targetTakeaways).map((content) => {
+    // Don't truncate - use full content if reasonable, or keep substantial portion
+    return content.length > 200 ? content.substring(0, 200).trim() + "..." : content;
   });
 
-  // Add remaining details
-  const remainingDetails = [...groupedContent.examples, ...groupedContent.benefits, ...groupedContent.details];
-  remainingDetails.slice(0, 5).forEach((detail) => {
-    allSentences.push(detail.length > 150 ? detail.substring(0, 150) + "..." : detail);
-  });
-
-  // Combine into 2-3 simple paragraphs
-  if (allSentences.length > 0) {
-    const midPoint = Math.ceil(allSentences.length / 2);
-    const firstHalf = allSentences.slice(0, midPoint);
-    const secondHalf = allSentences.slice(midPoint);
-
-    simplifiedNotes = firstHalf.join(" ") + "\n\n" + secondHalf.join(" ");
-  }
-
-  // Create key takeaways from actual sentences
-  const allContent = [
-    ...groupedContent.definitions.slice(0, 1),
-    ...groupedContent.processes.slice(0, 2),
-    ...groupedContent.examples.slice(0, 1),
-    ...groupedContent.benefits.slice(0, 1),
-    ...groupedContent.details.slice(0, 3)
-  ].filter(Boolean);
-
-  const keyTakeaways = allContent.slice(0, 6).map((content, i) => {
-    const short = content.length > 80 ? content.substring(0, 80) + "..." : content;
-    return short;
-  });
+  const flashcards = buildFlashcardsFromGroupedContent(groupedContent, topicName, targetFlashcards);
+  const quiz = buildQuizFromGroupedContent(groupedContent, topicName, targetQuizQuestions);
 
   return {
     simplified_notes: simplifiedNotes.trim() || "Simplified notes based on your input. Please provide more content for better results.",
     key_takeaways: keyTakeaways.length > 0 ? keyTakeaways : ["Add your content to see key takeaways"],
-    flashcards: buildFlashcardsFromText(sourceText),
+    flashcards,
+    quiz,
   };
 }
 
@@ -489,14 +631,38 @@ function normalizeFlashcards(value) {
       question: String(card?.question ?? "").trim(),
       answer: String(card?.answer ?? "").trim(),
     }))
-    .filter((card) => card.question && card.answer);
+    .filter((card) => card.question && card.answer)
+    .slice(0, MAX_FLASHCARDS);
 }
 
-function normalizeStudyGuide(payload) {
+function normalizeQuiz(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((q) => ({
+      question: String(q?.question ?? "").trim(),
+      options: Array.isArray(q?.options) ? q.options.map(String).filter(Boolean).slice(0, 4) : [],
+      correctAnswer: typeof q?.correctAnswer === 'number' ? q.correctAnswer : 0,
+      explanation: String(q?.explanation ?? "").trim() || "No explanation provided.",
+    }))
+    .filter((q) => q.question && q.options.length >= 2)
+    .slice(0, MAX_QUIZ_QUESTIONS);
+}
+
+function normalizeStudyGuide(payload, sourceText = "") {
+  const flashcards = normalizeFlashcards(payload?.flashcards);
+  const quiz = normalizeQuiz(payload?.quiz);
+  const fallbackSource = sourceText || payload?.simplified_notes || "";
+  
   return {
     simplified_notes: String(payload?.simplified_notes ?? "").trim(),
-    key_takeaways: normalizeTakeaways(payload?.key_takeaways).slice(0, 5),
-    flashcards: normalizeFlashcards(payload?.flashcards),
+    key_takeaways: normalizeTakeaways(payload?.key_takeaways).slice(0, MAX_TAKEAWAYS),
+    flashcards:
+      flashcards.length >= MIN_FLASHCARDS ? flashcards : buildFlashcardsFromText(fallbackSource),
+    quiz:
+      quiz.length >= MIN_QUIZ_QUESTIONS ? quiz : buildQuizFromText(fallbackSource),
   };
 }
 
@@ -549,8 +715,32 @@ async function fetchRemoteGuide(trimmedText) {
                       required: ["question", "answer"],
                     },
                   },
+                  quiz: {
+                    type: "ARRAY",
+                    items: {
+                      type: "OBJECT",
+                      properties: {
+                        question: {
+                          type: "STRING",
+                        },
+                        options: {
+                          type: "ARRAY",
+                          items: {
+                            type: "STRING",
+                          },
+                        },
+                        correctAnswer: {
+                          type: "NUMBER",
+                        },
+                        explanation: {
+                          type: "STRING",
+                        },
+                      },
+                      required: ["question", "options", "correctAnswer", "explanation"],
+                    },
+                  },
                 },
-                required: ["simplified_notes", "key_takeaways", "flashcards"],
+                required: ["simplified_notes", "key_takeaways", "flashcards", "quiz"],
               },
             },
           }),
@@ -564,7 +754,7 @@ async function fetchRemoteGuide(trimmedText) {
             prompt,
             input: trimmedText,
             system_prompt:
-              "Analyze the provided study material and return only valid JSON with simplified notes, key takeaways, and flashcards.",
+              "Analyze the provided study material and return only valid JSON with simplified notes, key takeaways, flashcards, and quiz questions that cover the full topic.",
             response_format: "json",
           }),
         };
@@ -608,7 +798,7 @@ async function fetchRemoteGuide(trimmedText) {
     );
   }
 
-  return normalizeStudyGuide(payload);
+  return normalizeStudyGuide(payload, trimmedText);
 }
 
 export async function generateStudyGuide(sourceText) {
@@ -628,7 +818,8 @@ export async function generateStudyGuide(sourceText) {
     if (
       !normalized.simplified_notes ||
       normalized.key_takeaways.length === 0 ||
-      normalized.flashcards.length === 0
+      normalized.flashcards.length < MIN_FLASHCARDS ||
+      normalized.quiz.length < MIN_QUIZ_QUESTIONS
     ) {
       return buildLocalStudyGuide(trimmedText);
     }

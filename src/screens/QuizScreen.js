@@ -13,6 +13,27 @@ import { buildQuizQuestions } from "../utils/quiz";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as NavigationBar from "expo-navigation-bar";
 
+function normalizeQuizQuestion(question, index) {
+  const options = Array.isArray(question?.options) ? question.options.map(String).filter(Boolean) : [];
+  const fallbackCorrectIndex =
+    typeof question?.correctAnswer === "string"
+      ? options.findIndex((option) => option === question.correctAnswer)
+      : -1;
+  const correctAnswerIndex =
+    typeof question?.correctAnswer === "number"
+      ? question.correctAnswer
+      : fallbackCorrectIndex;
+
+  return {
+    id: String(question?.id ?? `${question?.question ?? "question"}-${index}`),
+    question: String(question?.question ?? "").trim(),
+    options,
+    correctAnswerIndex:
+      correctAnswerIndex >= 0 && correctAnswerIndex < options.length ? correctAnswerIndex : 0,
+    explanation: String(question?.explanation ?? "").trim(),
+  };
+}
+
 export default function QuizScreen() {
   const { isDarkMode } = useTheme();
   const colors = getColors(isDarkMode);
@@ -28,10 +49,20 @@ export default function QuizScreen() {
   const [timerActive, setTimerActive] = useState(false);
 
   const selectedTopic = guides.find((g) => g.id === selectedTopicId);
-  const questions = useMemo(
-    () => (selectedTopic ? buildQuizQuestions(selectedTopic.flashcards) : []),
-    [selectedTopic]
-  );
+  const questions = useMemo(() => {
+    if (!selectedTopic) {
+      return [];
+    }
+
+    const rawQuestions =
+      Array.isArray(selectedTopic.quiz) && selectedTopic.quiz.length > 0
+        ? selectedTopic.quiz
+        : buildQuizQuestions(selectedTopic.flashcards);
+
+    return rawQuestions
+      .map((question, index) => normalizeQuizQuestion(question, index))
+      .filter((question) => question.question && question.options.length >= 2);
+  }, [selectedTopic]);
   const currentQuestion = questions[questionIndex];
   const totalTime = questions.length * 30;
   const insets = useSafeAreaInsets();
@@ -231,7 +262,7 @@ export default function QuizScreen() {
                   <View style={styles.topicCardTextContainer}>
                     <Text style={[styles.topicCardTitle, { color: colors.text }]}>{item.title}</Text>
                     <Text style={[styles.topicCardMeta, { color: colors.textSoft }]}>
-                      {buildQuizQuestions(item.flashcards).length} questions • Tap to start quiz
+                      {(Array.isArray(item.quiz) && item.quiz.length > 0 ? item.quiz.length : buildQuizQuestions(item.flashcards).length)} questions • Tap to start quiz
                     </Text>
                   </View>
                   <Ionicons name="arrow-forward" size={18} color={colors.primary} />
@@ -410,7 +441,7 @@ export default function QuizScreen() {
   if (isComplete) {
     // Calculate score based on userAnswers
     const score = userAnswers.filter(
-      (answer, index) => answer === questions[index].correctAnswer
+      (answer, index) => answer === questions[index].options[questions[index].correctAnswerIndex]
     ).length;
 
     const percentage = Math.round((score / questions.length) * 100);
@@ -453,7 +484,7 @@ export default function QuizScreen() {
 
           {questions.map((question, index) => {
             const userAnswer = userAnswers[index];
-            const correctAnswer = question.correctAnswer;
+            const correctAnswer = question.options[question.correctAnswerIndex];
             const isCorrect = userAnswer === correctAnswer;
 
             return (

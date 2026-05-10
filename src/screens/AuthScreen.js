@@ -62,11 +62,11 @@ export default function AuthScreen() {
       await GoogleSignin.hasPlayServices();
       const userInfo = await GoogleSignin.signIn();
       const idToken = userInfo.idToken;
-      
+
       // Pass the token to Firebase
       const googleCredential = GoogleAuthProvider.credential(idToken);
       await signInWithCredential(auth, googleCredential);
-      
+
       Alert.alert("Success", "Signed in with Google!");
     } catch (error) {
       Alert.alert("Google Sign-In Error", error.message);
@@ -129,4 +129,3 @@ const styles = StyleSheet.create({
   googleButton: { backgroundColor: '#fff', padding: 15, borderRadius: 10, alignItems: 'center', borderWidth: 1, borderColor: '#e0e0e0' },
   googleButtonText: { color: '#1a1a24', fontSize: 16, fontWeight: 'bold' },
 });
- 

@@ -1,13 +1,75 @@
 import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { GoogleSignin } from "@react-native-google-signin/google-signin";
+
+import { FIREBASE_API_KEY, FIREBASE_AUTH_BASE_URL } from "../config/auth";
 
 const AuthContext = createContext();
 
 const AUTH_USER_KEY = "authUser";
 
-// Backend API URL - uses local network IP for mobile testing
-// Change this to your actual backend URL when deployed
-const API_URL = process.env.EXPO_PUBLIC_API_URL || "http://192.168.1.36:5000/api";
+function getFirebaseUrl(path) {
+  return `${FIREBASE_AUTH_BASE_URL}/${path}?key=${FIREBASE_API_KEY}`;
+}
+
+async function parseJson(response) {
+  const text = await response.text();
+  return text ? JSON.parse(text) : {};
+}
+
+function mapFirebaseError(errorCode) {
+  switch (errorCode) {
+    case "EMAIL_EXISTS":
+      return "This email is already registered. Please sign in instead.";
+    case "EMAIL_NOT_FOUND":
+    case "INVALID_LOGIN_CREDENTIALS":
+    case "INVALID_PASSWORD":
+      return "Invalid email or password.";
+    case "WEAK_PASSWORD : Password should be at least 6 characters":
+    case "WEAK_PASSWORD":
+      return "Password must be at least 6 characters long.";
+    case "USER_DISABLED":
+      return "This account has been disabled.";
+    case "TOO_MANY_ATTEMPTS_TRY_LATER":
+      return "Too many attempts. Please try again later.";
+    case "INVALID_IDP_RESPONSE":
+    case "INVALID_ID_TOKEN":
+      return "Google sign-in could not be verified. Please try again.";
+    default:
+      return null;
+  }
+}
+
+async function firebaseRequest(path, body) {
+  const response = await fetch(getFirebaseUrl(path), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  const data = await parseJson(response);
+
+  if (!response.ok) {
+    const firebaseCode = data?.error?.message;
+    const friendlyMessage = mapFirebaseError(firebaseCode);
+    throw new Error(friendlyMessage || "Authentication failed. Please try again.");
+  }
+
+  return data;
+}
+
+function buildUserSession(data, provider, fallbackProfile = {}) {
+  return {
+    id: data.localId,
+    name: data.displayName || fallbackProfile.name || "Smart Study User",
+    email: data.email || fallbackProfile.email,
+    avatar: data.photoUrl || fallbackProfile.photo || null,
+    token: data.idToken,
+    refreshToken: data.refreshToken || null,
+    provider,
+    signedInAt: Date.now(),
+  };
+}
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
@@ -30,29 +92,25 @@ export function AuthProvider({ children }) {
     }
   }
 
-  // Email/Password Sign Up
   async function signUpWithEmail({ name, email, password }) {
     try {
-      const response = await fetch(`${API_URL}/auth/signup`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, email, password }),
+      const normalizedEmail = email.trim().toLowerCase();
+      const signUpData = await firebaseRequest("accounts:signUp", {
+        email: normalizedEmail,
+        password,
+        returnSecureToken: true,
       });
 
-      const data = await response.json();
+      const updatedProfile = await firebaseRequest("accounts:update", {
+        idToken: signUpData.idToken,
+        displayName: name.trim(),
+        returnSecureToken: true,
+      });
 
-      if (!response.ok) {
-        throw new Error(data.message || "Sign up failed");
-      }
-
-      const signedInUser = {
-        id: data.user.id,
-        name: data.user.name,
-        email: data.user.email,
-        token: data.token,
-        provider: "email",
-        signedInAt: Date.now(),
-      };
+      const signedInUser = buildUserSession(updatedProfile, "email", {
+        name: name.trim(),
+        email: normalizedEmail,
+      });
 
       setUser(signedInUser);
       await AsyncStorage.setItem(AUTH_USER_KEY, JSON.stringify(signedInUser));
@@ -62,29 +120,18 @@ export function AuthProvider({ children }) {
     }
   }
 
-  // Email/Password Sign In
   async function signInWithEmail({ email, password }) {
     try {
-      const response = await fetch(`${API_URL}/auth/signin`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
+      const normalizedEmail = email.trim().toLowerCase();
+      const data = await firebaseRequest("accounts:signInWithPassword", {
+        email: normalizedEmail,
+        password,
+        returnSecureToken: true,
       });
 
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.message || "Invalid email or password");
-      }
-
-      const signedInUser = {
-        id: data.user.id,
-        name: data.user.name,
-        email: data.user.email,
-        token: data.token,
-        provider: "email",
-        signedInAt: Date.now(),
-      };
+      const signedInUser = buildUserSession(data, "email", {
+        email: normalizedEmail,
+      });
 
       setUser(signedInUser);
       await AsyncStorage.setItem(AUTH_USER_KEY, JSON.stringify(signedInUser));
@@ -94,36 +141,24 @@ export function AuthProvider({ children }) {
     }
   }
 
-  // Google Sign In - uses backend to verify Google token
   async function signInWithGoogle(googleUserData) {
     try {
-      // Send Google user data to backend for verification/storage
-      const response = await fetch(`${API_URL}/auth/google`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email: googleUserData.email,
-          name: googleUserData.name || googleUserData.displayName,
-          photo: googleUserData.photo || googleUserData.photoURL,
-          idToken: googleUserData.idToken,
-        }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.message || "Google sign in failed");
+      if (!googleUserData?.idToken) {
+        throw new Error("Google sign-in did not return an ID token.");
       }
 
-      const signedInUser = {
-        id: data.user.id,
-        name: data.user.name,
-        email: data.user.email,
-        avatar: data.user.photo || googleUserData.photo,
-        token: data.token,
-        provider: "google",
-        signedInAt: Date.now(),
-      };
+      const data = await firebaseRequest("accounts:signInWithIdp", {
+        postBody: `id_token=${encodeURIComponent(googleUserData.idToken)}&providerId=google.com`,
+        requestUri: "http://localhost",
+        returnSecureToken: true,
+        returnIdpCredential: true,
+      });
+
+      const signedInUser = buildUserSession(data, "google", {
+        name: googleUserData.name || googleUserData.displayName,
+        email: googleUserData.email,
+        photo: googleUserData.photo || googleUserData.photoURL,
+      });
 
       setUser(signedInUser);
       await AsyncStorage.setItem(AUTH_USER_KEY, JSON.stringify(signedInUser));
@@ -134,6 +169,14 @@ export function AuthProvider({ children }) {
   }
 
   async function signOut() {
+    try {
+      if (user?.provider === "google") {
+        await GoogleSignin.signOut();
+      }
+    } catch (error) {
+      console.warn("Google sign-out cleanup failed:", error);
+    }
+
     setUser(null);
     await AsyncStorage.removeItem(AUTH_USER_KEY);
   }

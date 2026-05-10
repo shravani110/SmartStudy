@@ -13,6 +13,7 @@
     },
     "android": {
       "package": "com.anonymous.smartstudyquizgenerator",
+      "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "foregroundImage": "./assets/logo_scaled.jpeg",
         "backgroundColor": "#FFFFFF"

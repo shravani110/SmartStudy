@@ -3,6 +3,7 @@ import React, { createContext, useContext, useEffect, useMemo, useState } from "
 
 import {
   buildFlashcardsFromText,
+  buildQuizFromText,
   generateStudyGuide,
   hasLegacyFlashcards,
 } from "../api/aiService";
@@ -81,11 +82,11 @@ function makeGuideTitle(sourceText) {
   return title;
 }
 
-function getStorageKey(userPhone) {
-  if (!userPhone) {
+function getStorageKey(userId) {
+  if (!userId) {
     return null;
   }
-  return `${STORAGE_KEY_PREFIX}/${userPhone}`;
+  return `${STORAGE_KEY_PREFIX}/${userId}`;
 }
 
 function upgradeGuideIfNeeded(guide) {
@@ -93,14 +94,30 @@ function upgradeGuideIfNeeded(guide) {
     return guide;
   }
 
-  if (!guide.sourceText || !hasLegacyFlashcards(guide.flashcards)) {
+  if (!guide.sourceText) {
     return guide;
   }
 
-  return {
-    ...guide,
-    flashcards: buildFlashcardsFromText(guide.sourceText),
-  };
+  // Upgrade if flashcards are legacy OR if quiz is missing
+  const needsFlashcardUpgrade = hasLegacyFlashcards(guide.flashcards);
+  const needsQuizUpgrade = !guide.quiz || guide.quiz.length === 0;
+  
+  if (!needsFlashcardUpgrade && !needsQuizUpgrade) {
+    return guide;
+  }
+
+  const upgraded = { ...guide };
+  
+  if (needsFlashcardUpgrade) {
+    upgraded.flashcards = buildFlashcardsFromText(guide.sourceText, 6);
+  }
+  
+  // Add quiz if missing
+  if (needsQuizUpgrade) {
+    upgraded.quiz = buildQuizFromText(guide.sourceText, 10);
+  }
+  
+  return upgraded;
 }
 
 export function StudyGuidesProvider({ children }) {
@@ -112,7 +129,7 @@ export function StudyGuidesProvider({ children }) {
   useEffect(() => {
     async function loadGuides() {
       try {
-        const storageKey = getStorageKey(user?.phone);
+        const storageKey = getStorageKey(user?.id || user?.email);
         if (!storageKey) {
           setGuides([]);
           setSelectedGuideId(null);
@@ -146,14 +163,14 @@ export function StudyGuidesProvider({ children }) {
     }
 
     loadGuides();
-  }, [user?.phone]);
+  }, [user?.id, user?.email]);
 
   useEffect(() => {
     if (!isHydrated) {
       return;
     }
 
-    const storageKey = getStorageKey(user?.phone);
+    const storageKey = getStorageKey(user?.id || user?.email);
     if (!storageKey) {
       return;
     }
@@ -161,7 +178,7 @@ export function StudyGuidesProvider({ children }) {
     AsyncStorage.setItem(storageKey, JSON.stringify(guides)).catch((error) => {
       console.warn("Failed to save study guides:", error);
     });
-  }, [guides, isHydrated, user?.phone]);
+  }, [guides, isHydrated, user?.id, user?.email]);
 
   useEffect(() => {
     if (guides.length === 0) {
